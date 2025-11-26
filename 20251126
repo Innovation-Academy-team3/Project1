@@ -1,0 +1,694 @@
+{
+ "cells": [
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "colab": {
+     "base_uri": "https://localhost:8080/"
+    },
+    "id": "3-XLV5QkwWEW",
+    "outputId": "38482354-e971-40b0-d271-b8766288f539"
+   },
+   "outputs": [],
+   "source": [
+    "import ultralytics\n",
+    "import torch"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "**M1칩 내 GPU 사용 가능 여부 확인**"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "colab": {
+     "base_uri": "https://localhost:8080/"
+    },
+    "id": "-iIGtdoGwcXe",
+    "outputId": "a8d71693-5b14-4abc-f22e-6ebcd01946f4",
+    "scrolled": true
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "PyTorch version: 2.2.2\n",
+      "MPS available: True\n",
+      "MPS built: True\n"
+     ]
+    }
+   ],
+   "source": [
+    "print(\"PyTorch version:\", torch.__version__)\n",
+    "print(\"MPS available:\", torch.backends.mps.is_available())\n",
+    "print(\"MPS built:\", torch.backends.mps.is_built())"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "**KITTI 라벨을 YOLO에서 사용하는 형식으로 바꾸기**"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 4,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import os\n",
+    "import cv2\n",
+    "from tqdm.auto import tqdm  # 맨 위 import들 옆에 추가\n",
+    "\n",
+    "# ----- 경로 설정 -----\n",
+    "IMG_DIR = \"data_object_image_2/training/image_2\"\n",
+    "LBL_DIR = \"training/label_2\"\n",
+    "\n",
+    "OUT_IMG = \"kitti/images_yolo\"      # YOLO 이미지 저장\n",
+    "OUT_LBL = \"kitti/labels_yolo\"      # YOLO 라벨 저장\n",
+    "\n",
+    "os.makedirs(OUT_IMG, exist_ok=True)\n",
+    "os.makedirs(OUT_LBL, exist_ok=True)\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "application/vnd.jupyter.widget-view+json": {
+       "model_id": "53256dd5dc5a4674a3d0bdd3add06002",
+       "version_major": 2,
+       "version_minor": 0
+      },
+      "text/plain": [
+       "Converting KITTI → YOLO:   0%|          | 0/7481 [00:00<?, ?it/s]"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "\n",
+    "# ----- 클래스 매핑  -----\n",
+    "def map_class(name: str):\n",
+    "    name = name.lower()\n",
+    "\n",
+    "    # 차량 계열\n",
+    "    if name in [\"car\", \"van\", \"truck\"]:\n",
+    "        return 0\n",
+    "\n",
+    "    # 보행자\n",
+    "    if name in [\"pedestrian\"]:\n",
+    "        return 1\n",
+    "\n",
+    "    # 이륜차\n",
+    "    if name in [\"cyclist\"]:\n",
+    "        return 2\n",
+    "\n",
+    "    # 제거할 클래스들\n",
+    "    if name in [\"person_sitting\", \"dontcare\", \"misc\", \"tram\"]:\n",
+    "        return None\n",
+    "\n",
+    "    # 그 외도 전부 무시\n",
+    "    return None\n",
+    "\n",
+    "\n",
+    "# ----- 변환 함수 -----\n",
+    "def convert_kitti_to_yolo(img_name):\n",
+    "    img_path = os.path.join(IMG_DIR, img_name)\n",
+    "    label_name = img_name.replace(\".png\", \".txt\").replace(\".jpg\", \".txt\")\n",
+    "    label_path = os.path.join(LBL_DIR, label_name)\n",
+    "\n",
+    "    img = cv2.imread(img_path)\n",
+    "    if img is None:\n",
+    "        return\n",
+    "\n",
+    "    h, w = img.shape[:2]\n",
+    "    yolo_lines = []\n",
+    "\n",
+    "    if os.path.exists(label_path):\n",
+    "        with open(label_path, \"r\") as f:\n",
+    "            for line in f:\n",
+    "                parts = line.strip().split()\n",
+    "                cls_name = parts[0]\n",
+    "\n",
+    "                cls_id = map_class(cls_name)\n",
+    "                if cls_id is None:\n",
+    "                    continue\n",
+    "\n",
+    "                xmin = float(parts[4])\n",
+    "                ymin = float(parts[5])\n",
+    "                xmax = float(parts[6])\n",
+    "                ymax = float(parts[7])\n",
+    "\n",
+    "                x_center = ((xmin + xmax) / 2) / w\n",
+    "                y_center = ((ymin + ymax) / 2) / h\n",
+    "                bw = (xmax - xmin) / w\n",
+    "                bh = (ymax - ymin) / h\n",
+    "\n",
+    "                if bw <= 0 or bh <= 0:\n",
+    "                    continue\n",
+    "\n",
+    "                yolo_lines.append(f\"{cls_id} {x_center} {y_center} {bw} {bh}\\n\")\n",
+    "\n",
+    "    # 저장\n",
+    "    out_img_path = os.path.join(OUT_IMG, img_name)\n",
+    "    out_lbl_path = os.path.join(OUT_LBL, label_name)\n",
+    "\n",
+    "    cv2.imwrite(out_img_path, img)\n",
+    "    with open(out_lbl_path, \"w\") as f:\n",
+    "        f.writelines(yolo_lines)\n",
+    "\n",
+    "\n",
+    "# 파일 목록\n",
+    "files = sorted([f for f in os.listdir(IMG_DIR)\n",
+    "                if f.endswith(\".png\") or f.endswith(\".jpg\")])\n",
+    "\n",
+    "# 🔥 tqdm으로 진행률 표시\n",
+    "for name in tqdm(files, desc=\"Converting KITTI → YOLO\"):\n",
+    "    convert_kitti_to_yolo(name)\n",
+    "\n",
+    "print(\"KITTI → YOLO 변환 완료!\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "**라벨 변환이 잘 되었는지 실제 이미지에 박스 그려서 확인하는 시각화**"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import os\n",
+    "import random\n",
+    "import cv2\n",
+    "from IPython.display import Image, display\n",
+    "\n",
+    "# YOLO 변환된 파일이 저장된 폴더\n",
+    "YOLO_IMG_DIR = \"kitti/images_yolo\"\n",
+    "YOLO_LBL_DIR = \"kitti/labels_yolo\"\n",
+    "\n",
+    "# class_id → 클래스명 매핑\n",
+    "CLASS_NAMES = {\n",
+    "    0: \"vehicle\",\n",
+    "    1: \"pedestrian\",\n",
+    "    2: \"two_wheeler\"\n",
+    "}"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "YOLO 이미지 폴더가 비어 있습니다: kitti/images_yolo\n"
+     ]
+    }
+   ],
+   "source": [
+    "def visualize_yolo_label():\n",
+    "    # YOLO 이미지 목록\n",
+    "    img_files = [f for f in os.listdir(YOLO_IMG_DIR)\n",
+    "                 if f.endswith(\".png\") or f.endswith(\".jpg\")]\n",
+    "\n",
+    "    if not img_files:\n",
+    "        print(\"YOLO 이미지 폴더가 비어 있습니다:\", YOLO_IMG_DIR)\n",
+    "        return\n",
+    "    \n",
+    "    # 랜덤 이미지 선택\n",
+    "    img_name = random.choice(img_files)\n",
+    "    img_path = os.path.join(YOLO_IMG_DIR, img_name)\n",
+    "\n",
+    "    label_name = img_name.rsplit(\".\", 1)[0] + \".txt\"\n",
+    "    label_path = os.path.join(YOLO_LBL_DIR, label_name)\n",
+    "\n",
+    "    print(\"선택된 이미지:\", img_name)\n",
+    "    print(\"YOLO 라벨 파일:\", label_path)\n",
+    "\n",
+    "    # 이미지 읽기\n",
+    "    img = cv2.imread(img_path)\n",
+    "    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)\n",
+    "    h, w = img_rgb.shape[:2]\n",
+    "\n",
+    "    # 라벨 읽기\n",
+    "    if os.path.exists(label_path):\n",
+    "        with open(label_path, \"r\") as f:\n",
+    "            for line in f:\n",
+    "                parts = line.strip().split()\n",
+    "                cls_id = int(parts[0])\n",
+    "                x_center = float(parts[1])\n",
+    "                y_center = float(parts[2])\n",
+    "                bw = float(parts[3])\n",
+    "                bh = float(parts[4])\n",
+    "\n",
+    "                # YOLO 포맷 → 픽셀 좌표 변환\n",
+    "                box_w = bw * w\n",
+    "                box_h = bh * h\n",
+    "                cx = x_center * w\n",
+    "                cy = y_center * h\n",
+    "\n",
+    "                xmin = int(cx - box_w / 2)\n",
+    "                ymin = int(cy - box_h / 2)\n",
+    "                xmax = int(cx + box_w / 2)\n",
+    "                ymax = int(cy + box_h / 2)\n",
+    "\n",
+    "                # 박스 그리기\n",
+    "                color = (0, 255, 0)\n",
+    "                cv2.rectangle(img_rgb, (xmin, ymin), (xmax, ymax), color, 2)\n",
+    "\n",
+    "                cls_name = CLASS_NAMES.get(cls_id, str(cls_id))\n",
+    "                cv2.putText(\n",
+    "                    img_rgb,\n",
+    "                    cls_name,\n",
+    "                    (xmin, max(0, ymin - 5)),\n",
+    "                    cv2.FONT_HERSHEY_SIMPLEX,\n",
+    "                    0.6,\n",
+    "                    color,\n",
+    "                    2\n",
+    "                )\n",
+    "\n",
+    "    else:\n",
+    "        print(\"라벨 파일이 없습니다:\", label_path)\n",
+    "\n",
+    "    # 이미지 저장 후 출력\n",
+    "    out_path = \"yolo_debug.png\"\n",
+    "    cv2.imwrite(out_path, cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR))\n",
+    "\n",
+    "    print(\"시각화 이미지 저장됨:\", out_path)\n",
+    "    display(Image(filename=out_path))\n",
+    "\n",
+    "\n",
+    "# 실행\n",
+    "visualize_yolo_label()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "**Train과 Validation 데이터 6:4로 분리**"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 10,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "전체 이미지 수: 7481\n",
+      "train: 4488  / val: 2993\n",
+      "데이터 분리 완료!\n",
+      "images_yolo/train: 4488\n",
+      "images_yolo/val  : 2993\n",
+      "labels_yolo/train: 4488\n",
+      "labels_yolo/val  : 2993\n"
+     ]
+    }
+   ],
+   "source": [
+    "import os\n",
+    "import random\n",
+    "import shutil\n",
+    "\n",
+    "BASE_DIR = \"kitti\"\n",
+    "IMG_ROOT = os.path.join(BASE_DIR, \"images_yolo\")\n",
+    "LBL_ROOT = os.path.join(BASE_DIR, \"labels_yolo\")\n",
+    "\n",
+    "IMG_TRAIN = os.path.join(IMG_ROOT, \"train\")\n",
+    "IMG_VAL   = os.path.join(IMG_ROOT, \"val\")\n",
+    "LBL_TRAIN = os.path.join(LBL_ROOT, \"train\")\n",
+    "LBL_VAL   = os.path.join(LBL_ROOT, \"val\")\n",
+    "\n",
+    "os.makedirs(IMG_TRAIN, exist_ok=True)\n",
+    "os.makedirs(IMG_VAL, exist_ok=True)\n",
+    "os.makedirs(LBL_TRAIN, exist_ok=True)\n",
+    "os.makedirs(LBL_VAL, exist_ok=True)\n",
+    "\n",
+    "# 이미지 파일 목록 가져오기 (train/val 폴더 제외)\n",
+    "all_imgs = [\n",
+    "    f for f in os.listdir(IMG_ROOT)\n",
+    "    if f.endswith((\".png\", \".jpg\")) and\n",
+    "       os.path.isfile(os.path.join(IMG_ROOT, f))\n",
+    "]\n",
+    "\n",
+    "print(\"전체 이미지 수:\", len(all_imgs))\n",
+    "\n",
+    "# 6:4 split\n",
+    "random.seed(42)\n",
+    "random.shuffle(all_imgs)\n",
+    "\n",
+    "n_total = len(all_imgs)\n",
+    "n_train = int(n_total * 0.6)\n",
+    "train_files = all_imgs[:n_train]\n",
+    "val_files   = all_imgs[n_train:]\n",
+    "\n",
+    "print(\"train:\", len(train_files), \" / val:\", len(val_files))\n",
+    "\n",
+    "def move_pair(img_name, dst_img_dir, dst_lbl_dir):\n",
+    "    src_img_path = os.path.join(IMG_ROOT, img_name)\n",
+    "    src_lbl_name = os.path.splitext(img_name)[0] + \".txt\"\n",
+    "    src_lbl_path = os.path.join(LBL_ROOT, src_lbl_name)\n",
+    "\n",
+    "    dst_img_path = os.path.join(dst_img_dir, img_name)\n",
+    "    dst_lbl_path = os.path.join(dst_lbl_dir, src_lbl_name)\n",
+    "\n",
+    "    # 이미지 이동\n",
+    "    shutil.move(src_img_path, dst_img_path)\n",
+    "\n",
+    "    # 라벨이 존재하는 경우만 이동 (없으면 그냥 무시)\n",
+    "    if os.path.exists(src_lbl_path):\n",
+    "        shutil.move(src_lbl_path, dst_lbl_path)\n",
+    "\n",
+    "# 실제 이동\n",
+    "for name in train_files:\n",
+    "    move_pair(name, IMG_TRAIN, LBL_TRAIN)\n",
+    "\n",
+    "for name in val_files:\n",
+    "    move_pair(name, IMG_VAL, LBL_VAL)\n",
+    "\n",
+    "print(\"데이터 분리 완료!\")\n",
+    "print(\"images_yolo/train:\", len(os.listdir(IMG_TRAIN)))\n",
+    "print(\"images_yolo/val  :\", len(os.listdir(IMG_VAL)))\n",
+    "print(\"labels_yolo/train:\", len(os.listdir(LBL_TRAIN)))\n",
+    "print(\"labels_yolo/val  :\", len(os.listdir(LBL_VAL)))\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "**YAML파일 생성**"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 11,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "kitti.yaml 생성 완료 → /Users/jihyunsmac/Desktop/팀_프로젝트/project1/kitti.yaml\n",
+      "내용:\n",
+      "train: kitti/images_yolo/train\n",
+      "val: kitti/images_yolo/val\n",
+      "\n",
+      "nc: 3\n",
+      "names: [\"vehicle\", \"pedestrian\", \"two_wheeler\"]\n",
+      "\n"
+     ]
+    }
+   ],
+   "source": [
+    "yaml_text = \"\"\"train: kitti/images_yolo/train\n",
+    "val: kitti/images_yolo/val\n",
+    "\n",
+    "nc: 3\n",
+    "names: [\"vehicle\", \"pedestrian\", \"two_wheeler\"]\n",
+    "\"\"\"\n",
+    "\n",
+    "yaml_path = \"kitti.yaml\"\n",
+    "with open(yaml_path, \"w\") as f:\n",
+    "    f.write(yaml_text)\n",
+    "\n",
+    "print(\"kitti.yaml 생성 완료 →\", os.path.abspath(yaml_path))\n",
+    "print(\"내용:\")\n",
+    "print(yaml_text)\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "**모델 학습 (yolon11n.pt)**"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Ultralytics 8.3.232 🚀 Python-3.8.10 torch-2.2.2 MPS (Apple M1)\n",
+      "\u001b[34m\u001b[1mengine/trainer: \u001b[0magnostic_nms=False, amp=True, augment=False, auto_augment=randaugment, batch=8, bgr=0.0, box=7.5, cache=False, cfg=None, classes=None, close_mosaic=10, cls=0.5, compile=False, conf=None, copy_paste=0.0, copy_paste_mode=flip, cos_lr=False, cutmix=0.0, data=kitti.yaml, degrees=0.0, deterministic=True, device=mps, dfl=1.5, dnn=False, dropout=0.0, dynamic=False, embed=None, epochs=50, erasing=0.4, exist_ok=False, fliplr=0.5, flipud=0.0, format=torchscript, fraction=1.0, freeze=None, half=False, hsv_h=0.015, hsv_s=0.7, hsv_v=0.4, imgsz=640, int8=False, iou=0.7, keras=False, kobj=1.0, line_width=None, lr0=0.01, lrf=0.01, mask_ratio=4, max_det=300, mixup=0.0, mode=train, model=yolo11n.pt, momentum=0.937, mosaic=1.0, multi_scale=False, name=train2, nbs=64, nms=False, opset=None, optimize=False, optimizer=auto, overlap_mask=True, patience=100, perspective=0.0, plots=True, pose=12.0, pretrained=True, profile=False, project=None, rect=False, resume=False, retina_masks=False, save=True, save_conf=False, save_crop=False, save_dir=/Users/jihyunsmac/Desktop/팀_프로젝트/project1/runs/detect/train2, save_frames=False, save_json=False, save_period=-1, save_txt=False, scale=0.5, seed=0, shear=0.0, show=False, show_boxes=True, show_conf=True, show_labels=True, simplify=True, single_cls=False, source=None, split=val, stream_buffer=False, task=detect, time=None, tracker=botsort.yaml, translate=0.1, val=True, verbose=True, vid_stride=1, visualize=False, warmup_bias_lr=0.1, warmup_epochs=3.0, warmup_momentum=0.8, weight_decay=0.0005, workers=8, workspace=None\n",
+      "Overriding model.yaml nc=80 with nc=3\n",
+      "\n",
+      "                   from  n    params  module                                       arguments                     \n",
+      "  0                  -1  1       464  ultralytics.nn.modules.conv.Conv             [3, 16, 3, 2]                 \n",
+      "  1                  -1  1      4672  ultralytics.nn.modules.conv.Conv             [16, 32, 3, 2]                \n",
+      "  2                  -1  1      6640  ultralytics.nn.modules.block.C3k2            [32, 64, 1, False, 0.25]      \n",
+      "  3                  -1  1     36992  ultralytics.nn.modules.conv.Conv             [64, 64, 3, 2]                \n",
+      "  4                  -1  1     26080  ultralytics.nn.modules.block.C3k2            [64, 128, 1, False, 0.25]     \n",
+      "  5                  -1  1    147712  ultralytics.nn.modules.conv.Conv             [128, 128, 3, 2]              \n",
+      "  6                  -1  1     87040  ultralytics.nn.modules.block.C3k2            [128, 128, 1, True]           \n",
+      "  7                  -1  1    295424  ultralytics.nn.modules.conv.Conv             [128, 256, 3, 2]              \n",
+      "  8                  -1  1    346112  ultralytics.nn.modules.block.C3k2            [256, 256, 1, True]           \n",
+      "  9                  -1  1    164608  ultralytics.nn.modules.block.SPPF            [256, 256, 5]                 \n",
+      " 10                  -1  1    249728  ultralytics.nn.modules.block.C2PSA           [256, 256, 1]                 \n",
+      " 11                  -1  1         0  torch.nn.modules.upsampling.Upsample         [None, 2, 'nearest']          \n",
+      " 12             [-1, 6]  1         0  ultralytics.nn.modules.conv.Concat           [1]                           \n",
+      " 13                  -1  1    111296  ultralytics.nn.modules.block.C3k2            [384, 128, 1, False]          \n",
+      " 14                  -1  1         0  torch.nn.modules.upsampling.Upsample         [None, 2, 'nearest']          \n",
+      " 15             [-1, 4]  1         0  ultralytics.nn.modules.conv.Concat           [1]                           \n",
+      " 16                  -1  1     32096  ultralytics.nn.modules.block.C3k2            [256, 64, 1, False]           \n",
+      " 17                  -1  1     36992  ultralytics.nn.modules.conv.Conv             [64, 64, 3, 2]                \n",
+      " 18            [-1, 13]  1         0  ultralytics.nn.modules.conv.Concat           [1]                           \n",
+      " 19                  -1  1     86720  ultralytics.nn.modules.block.C3k2            [192, 128, 1, False]          \n",
+      " 20                  -1  1    147712  ultralytics.nn.modules.conv.Conv             [128, 128, 3, 2]              \n",
+      " 21            [-1, 10]  1         0  ultralytics.nn.modules.conv.Concat           [1]                           \n",
+      " 22                  -1  1    378880  ultralytics.nn.modules.block.C3k2            [384, 256, 1, True]           \n",
+      " 23        [16, 19, 22]  1    431257  ultralytics.nn.modules.head.Detect           [3, [64, 128, 256]]           \n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "[W NNPACK.cpp:64] Could not initialize NNPACK! Reason: Unsupported hardware.\n"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "YOLO11n summary: 181 layers, 2,590,425 parameters, 2,590,409 gradients, 6.4 GFLOPs\n",
+      "\n",
+      "Transferred 448/499 items from pretrained weights\n",
+      "Freezing layer 'model.23.dfl.conv.weight'\n",
+      "\u001b[34m\u001b[1mtrain: \u001b[0mFast image access ✅ (ping: 0.1±0.0 ms, read: 764.7±232.7 MB/s, size: 743.4 KB)\n",
+      "\u001b[K\u001b[34m\u001b[1mtrain: \u001b[0mScanning /Users/jihyunsmac/Desktop/팀_프로젝트/project1/kitti/images_yolo/train... 0 images, 4488 backgrounds, 0 corrupt: 100% ━━━━━━━━━━━━ 4488/4488 175.4it/s 25.6s<0.1s\n",
+      "WARNING ⚠️ \u001b[34m\u001b[1mtrain: \u001b[0mNo labels found in /Users/jihyunsmac/Desktop/팀_프로젝트/project1/kitti/images_yolo/train.cache. See https://docs.ultralytics.com/datasets for dataset formatting guidance.\n",
+      "\u001b[34m\u001b[1mtrain: \u001b[0mNew cache created: /Users/jihyunsmac/Desktop/팀_프로젝트/project1/kitti/images_yolo/train.cache\n",
+      "WARNING ⚠️ Labels are missing or empty in /Users/jihyunsmac/Desktop/팀_프로젝트/project1/kitti/images_yolo/train.cache, training may not work correctly. See https://docs.ultralytics.com/datasets for dataset formatting guidance.\n",
+      "\u001b[34m\u001b[1mval: \u001b[0mFast image access ✅ (ping: 0.0±0.0 ms, read: 852.4±260.7 MB/s, size: 778.6 KB)\n",
+      "\u001b[K\u001b[34m\u001b[1mval: \u001b[0mScanning /Users/jihyunsmac/Desktop/팀_프로젝트/project1/kitti/images_yolo/val... 0 images, 2993 backgrounds, 0 corrupt: 100% ━━━━━━━━━━━━ 2993/2993 182.0it/s 16.4s<0.0s\n",
+      "WARNING ⚠️ \u001b[34m\u001b[1mval: \u001b[0mNo labels found in /Users/jihyunsmac/Desktop/팀_프로젝트/project1/kitti/images_yolo/val.cache. See https://docs.ultralytics.com/datasets for dataset formatting guidance.\n",
+      "\u001b[34m\u001b[1mval: \u001b[0mNew cache created: /Users/jihyunsmac/Desktop/팀_프로젝트/project1/kitti/images_yolo/val.cache\n",
+      "WARNING ⚠️ Labels are missing or empty in /Users/jihyunsmac/Desktop/팀_프로젝트/project1/kitti/images_yolo/val.cache, training may not work correctly. See https://docs.ultralytics.com/datasets for dataset formatting guidance.\n"
+     ]
+    }
+   ],
+   "source": [
+    "from ultralytics import YOLO\n",
+    "\n",
+    "# 1. 사전학습된 작은 모델 로드 (처음에는 yolo11n 권장)\n",
+    "model = YOLO(\"yolo11n.pt\")\n",
+    "\n",
+    "# 2. 학습\n",
+    "results = model.train(\n",
+    "    data=\"kitti.yaml\",   # 방금 만든 yaml\n",
+    "    epochs=50,           # 상황에 맞게 조절 가능\n",
+    "    imgsz=640,\n",
+    "    batch=8,             # M1 메모리 보고 조정 (작으면 4, 2로 줄이기)\n",
+    "    device=\"mps\"         # ⭐ M1 GPU 사용\n",
+    ")\n",
+    "\n",
+    "\n",
+    "#nvidia gpu 사용시\n",
+    "model.train(\n",
+    "    data=\"kitti.yaml\",\n",
+    "    epochs=50,\n",
+    "    imgsz=640,\n",
+    "    batch=8,\n",
+    "    device=\"cuda\"  # 또는 device=0 (첫 번째 GPU)\n",
+    ")\n",
+    "\n",
+    "print(\"학습 완료!\")\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "**mAP 측정 + 예측 시각화**"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 5,
+   "metadata": {},
+   "outputs": [
+    {
+     "ename": "FileNotFoundError",
+     "evalue": "[Errno 2] No such file or directory: 'runs/detect/train/weights/best.pt'",
+     "output_type": "error",
+     "traceback": [
+      "\u001b[0;31m---------------------------------------------------------------------------\u001b[0m",
+      "\u001b[0;31mFileNotFoundError\u001b[0m                         Traceback (most recent call last)",
+      "Cell \u001b[0;32mIn[5], line 2\u001b[0m\n\u001b[1;32m      1\u001b[0m \u001b[38;5;66;03m# best.pt 불러오기 (학습 후 자동 저장된 가중치)\u001b[39;00m\n\u001b[0;32m----> 2\u001b[0m best_model \u001b[38;5;241m=\u001b[39m \u001b[43mYOLO\u001b[49m\u001b[43m(\u001b[49m\u001b[38;5;124;43m\"\u001b[39;49m\u001b[38;5;124;43mruns/detect/train/weights/best.pt\u001b[39;49m\u001b[38;5;124;43m\"\u001b[39;49m\u001b[43m)\u001b[49m  \u001b[38;5;66;03m# 실제 경로는 로그에 나오는 이름 확인\u001b[39;00m\n\u001b[1;32m      4\u001b[0m val_results \u001b[38;5;241m=\u001b[39m best_model\u001b[38;5;241m.\u001b[39mval(device\u001b[38;5;241m=\u001b[39m\u001b[38;5;124m\"\u001b[39m\u001b[38;5;124mmps\u001b[39m\u001b[38;5;124m\"\u001b[39m)\n\u001b[1;32m      5\u001b[0m \u001b[38;5;28mprint\u001b[39m(\u001b[38;5;124m\"\u001b[39m\u001b[38;5;124mmAP50-95:\u001b[39m\u001b[38;5;124m\"\u001b[39m, val_results\u001b[38;5;241m.\u001b[39mbox\u001b[38;5;241m.\u001b[39mmap)   \u001b[38;5;66;03m# 전체 mAP\u001b[39;00m\n",
+      "File \u001b[0;32m~/Desktop/팀_프로젝트/.venv/lib/python3.8/site-packages/ultralytics/models/yolo/model.py:76\u001b[0m, in \u001b[0;36mYOLO.__init__\u001b[0;34m(self, model, task, verbose)\u001b[0m\n\u001b[1;32m     73\u001b[0m     \u001b[38;5;28mself\u001b[39m\u001b[38;5;241m.\u001b[39m\u001b[38;5;18m__dict__\u001b[39m \u001b[38;5;241m=\u001b[39m new_instance\u001b[38;5;241m.\u001b[39m\u001b[38;5;18m__dict__\u001b[39m\n\u001b[1;32m     74\u001b[0m \u001b[38;5;28;01melse\u001b[39;00m:\n\u001b[1;32m     75\u001b[0m     \u001b[38;5;66;03m# Continue with default YOLO initialization\u001b[39;00m\n\u001b[0;32m---> 76\u001b[0m     \u001b[38;5;28;43msuper\u001b[39;49m\u001b[43m(\u001b[49m\u001b[43m)\u001b[49m\u001b[38;5;241;43m.\u001b[39;49m\u001b[38;5;21;43m__init__\u001b[39;49m\u001b[43m(\u001b[49m\u001b[43mmodel\u001b[49m\u001b[38;5;241;43m=\u001b[39;49m\u001b[43mmodel\u001b[49m\u001b[43m,\u001b[49m\u001b[43m \u001b[49m\u001b[43mtask\u001b[49m\u001b[38;5;241;43m=\u001b[39;49m\u001b[43mtask\u001b[49m\u001b[43m,\u001b[49m\u001b[43m \u001b[49m\u001b[43mverbose\u001b[49m\u001b[38;5;241;43m=\u001b[39;49m\u001b[43mverbose\u001b[49m\u001b[43m)\u001b[49m\n\u001b[1;32m     77\u001b[0m     \u001b[38;5;28;01mif\u001b[39;00m \u001b[38;5;28mhasattr\u001b[39m(\u001b[38;5;28mself\u001b[39m\u001b[38;5;241m.\u001b[39mmodel, \u001b[38;5;124m\"\u001b[39m\u001b[38;5;124mmodel\u001b[39m\u001b[38;5;124m\"\u001b[39m) \u001b[38;5;129;01mand\u001b[39;00m \u001b[38;5;124m\"\u001b[39m\u001b[38;5;124mRTDETR\u001b[39m\u001b[38;5;124m\"\u001b[39m \u001b[38;5;129;01min\u001b[39;00m \u001b[38;5;28mself\u001b[39m\u001b[38;5;241m.\u001b[39mmodel\u001b[38;5;241m.\u001b[39mmodel[\u001b[38;5;241m-\u001b[39m\u001b[38;5;241m1\u001b[39m]\u001b[38;5;241m.\u001b[39m_get_name():  \u001b[38;5;66;03m# if RTDETR head\u001b[39;00m\n\u001b[1;32m     78\u001b[0m         \u001b[38;5;28;01mfrom\u001b[39;00m\u001b[38;5;250m \u001b[39m\u001b[38;5;21;01multralytics\u001b[39;00m\u001b[38;5;250m \u001b[39m\u001b[38;5;28;01mimport\u001b[39;00m RTDETR\n",
+      "File \u001b[0;32m~/Desktop/팀_프로젝트/.venv/lib/python3.8/site-packages/ultralytics/engine/model.py:144\u001b[0m, in \u001b[0;36mModel.__init__\u001b[0;34m(self, model, task, verbose)\u001b[0m\n\u001b[1;32m    142\u001b[0m     \u001b[38;5;28mself\u001b[39m\u001b[38;5;241m.\u001b[39m_new(model, task\u001b[38;5;241m=\u001b[39mtask, verbose\u001b[38;5;241m=\u001b[39mverbose)\n\u001b[1;32m    143\u001b[0m \u001b[38;5;28;01melse\u001b[39;00m:\n\u001b[0;32m--> 144\u001b[0m     \u001b[38;5;28;43mself\u001b[39;49m\u001b[38;5;241;43m.\u001b[39;49m\u001b[43m_load\u001b[49m\u001b[43m(\u001b[49m\u001b[43mmodel\u001b[49m\u001b[43m,\u001b[49m\u001b[43m \u001b[49m\u001b[43mtask\u001b[49m\u001b[38;5;241;43m=\u001b[39;49m\u001b[43mtask\u001b[49m\u001b[43m)\u001b[49m\n\u001b[1;32m    146\u001b[0m \u001b[38;5;66;03m# Delete super().training for accessing self.model.training\u001b[39;00m\n\u001b[1;32m    147\u001b[0m \u001b[38;5;28;01mdel\u001b[39;00m \u001b[38;5;28mself\u001b[39m\u001b[38;5;241m.\u001b[39mtraining\n",
+      "File \u001b[0;32m~/Desktop/팀_프로젝트/.venv/lib/python3.8/site-packages/ultralytics/engine/model.py:283\u001b[0m, in \u001b[0;36mModel._load\u001b[0;34m(self, weights, task)\u001b[0m\n\u001b[1;32m    280\u001b[0m weights \u001b[38;5;241m=\u001b[39m checks\u001b[38;5;241m.\u001b[39mcheck_model_file_from_stem(weights)  \u001b[38;5;66;03m# add suffix, i.e. yolo11n -> yolo11n.pt\u001b[39;00m\n\u001b[1;32m    282\u001b[0m \u001b[38;5;28;01mif\u001b[39;00m \u001b[38;5;28mstr\u001b[39m(weights)\u001b[38;5;241m.\u001b[39mrpartition(\u001b[38;5;124m\"\u001b[39m\u001b[38;5;124m.\u001b[39m\u001b[38;5;124m\"\u001b[39m)[\u001b[38;5;241m-\u001b[39m\u001b[38;5;241m1\u001b[39m] \u001b[38;5;241m==\u001b[39m \u001b[38;5;124m\"\u001b[39m\u001b[38;5;124mpt\u001b[39m\u001b[38;5;124m\"\u001b[39m:\n\u001b[0;32m--> 283\u001b[0m     \u001b[38;5;28mself\u001b[39m\u001b[38;5;241m.\u001b[39mmodel, \u001b[38;5;28mself\u001b[39m\u001b[38;5;241m.\u001b[39mckpt \u001b[38;5;241m=\u001b[39m \u001b[43mload_checkpoint\u001b[49m\u001b[43m(\u001b[49m\u001b[43mweights\u001b[49m\u001b[43m)\u001b[49m\n\u001b[1;32m    284\u001b[0m     \u001b[38;5;28mself\u001b[39m\u001b[38;5;241m.\u001b[39mtask \u001b[38;5;241m=\u001b[39m \u001b[38;5;28mself\u001b[39m\u001b[38;5;241m.\u001b[39mmodel\u001b[38;5;241m.\u001b[39mtask\n\u001b[1;32m    285\u001b[0m     \u001b[38;5;28mself\u001b[39m\u001b[38;5;241m.\u001b[39moverrides \u001b[38;5;241m=\u001b[39m \u001b[38;5;28mself\u001b[39m\u001b[38;5;241m.\u001b[39mmodel\u001b[38;5;241m.\u001b[39margs \u001b[38;5;241m=\u001b[39m \u001b[38;5;28mself\u001b[39m\u001b[38;5;241m.\u001b[39m_reset_ckpt_args(\u001b[38;5;28mself\u001b[39m\u001b[38;5;241m.\u001b[39mmodel\u001b[38;5;241m.\u001b[39margs)\n",
+      "File \u001b[0;32m~/Desktop/팀_프로젝트/.venv/lib/python3.8/site-packages/ultralytics/nn/tasks.py:1461\u001b[0m, in \u001b[0;36mload_checkpoint\u001b[0;34m(weight, device, inplace, fuse)\u001b[0m\n\u001b[1;32m   1448\u001b[0m \u001b[38;5;28;01mdef\u001b[39;00m\u001b[38;5;250m \u001b[39m\u001b[38;5;21mload_checkpoint\u001b[39m(weight, device\u001b[38;5;241m=\u001b[39m\u001b[38;5;28;01mNone\u001b[39;00m, inplace\u001b[38;5;241m=\u001b[39m\u001b[38;5;28;01mTrue\u001b[39;00m, fuse\u001b[38;5;241m=\u001b[39m\u001b[38;5;28;01mFalse\u001b[39;00m):\n\u001b[1;32m   1449\u001b[0m \u001b[38;5;250m    \u001b[39m\u001b[38;5;124;03m\"\"\"Load a single model weights.\u001b[39;00m\n\u001b[1;32m   1450\u001b[0m \n\u001b[1;32m   1451\u001b[0m \u001b[38;5;124;03m    Args:\u001b[39;00m\n\u001b[0;32m   (...)\u001b[0m\n\u001b[1;32m   1459\u001b[0m \u001b[38;5;124;03m        ckpt (dict): Model checkpoint dictionary.\u001b[39;00m\n\u001b[1;32m   1460\u001b[0m \u001b[38;5;124;03m    \"\"\"\u001b[39;00m\n\u001b[0;32m-> 1461\u001b[0m     ckpt, weight \u001b[38;5;241m=\u001b[39m \u001b[43mtorch_safe_load\u001b[49m\u001b[43m(\u001b[49m\u001b[43mweight\u001b[49m\u001b[43m)\u001b[49m  \u001b[38;5;66;03m# load ckpt\u001b[39;00m\n\u001b[1;32m   1462\u001b[0m     args \u001b[38;5;241m=\u001b[39m {\u001b[38;5;241m*\u001b[39m\u001b[38;5;241m*\u001b[39mDEFAULT_CFG_DICT, \u001b[38;5;241m*\u001b[39m\u001b[38;5;241m*\u001b[39m(ckpt\u001b[38;5;241m.\u001b[39mget(\u001b[38;5;124m\"\u001b[39m\u001b[38;5;124mtrain_args\u001b[39m\u001b[38;5;124m\"\u001b[39m, {}))}  \u001b[38;5;66;03m# combine model and default args, preferring model args\u001b[39;00m\n\u001b[1;32m   1463\u001b[0m     model \u001b[38;5;241m=\u001b[39m (ckpt\u001b[38;5;241m.\u001b[39mget(\u001b[38;5;124m\"\u001b[39m\u001b[38;5;124mema\u001b[39m\u001b[38;5;124m\"\u001b[39m) \u001b[38;5;129;01mor\u001b[39;00m ckpt[\u001b[38;5;124m\"\u001b[39m\u001b[38;5;124mmodel\u001b[39m\u001b[38;5;124m\"\u001b[39m])\u001b[38;5;241m.\u001b[39mfloat()  \u001b[38;5;66;03m# FP32 model\u001b[39;00m\n",
+      "File \u001b[0;32m~/Desktop/팀_프로젝트/.venv/lib/python3.8/site-packages/ultralytics/nn/tasks.py:1409\u001b[0m, in \u001b[0;36mtorch_safe_load\u001b[0;34m(weight, safe_only)\u001b[0m\n\u001b[1;32m   1407\u001b[0m                 ckpt \u001b[38;5;241m=\u001b[39m torch_load(f, pickle_module\u001b[38;5;241m=\u001b[39msafe_pickle)\n\u001b[1;32m   1408\u001b[0m         \u001b[38;5;28;01melse\u001b[39;00m:\n\u001b[0;32m-> 1409\u001b[0m             ckpt \u001b[38;5;241m=\u001b[39m \u001b[43mtorch_load\u001b[49m\u001b[43m(\u001b[49m\u001b[43mfile\u001b[49m\u001b[43m,\u001b[49m\u001b[43m \u001b[49m\u001b[43mmap_location\u001b[49m\u001b[38;5;241;43m=\u001b[39;49m\u001b[38;5;124;43m\"\u001b[39;49m\u001b[38;5;124;43mcpu\u001b[39;49m\u001b[38;5;124;43m\"\u001b[39;49m\u001b[43m)\u001b[49m\n\u001b[1;32m   1411\u001b[0m \u001b[38;5;28;01mexcept\u001b[39;00m \u001b[38;5;167;01mModuleNotFoundError\u001b[39;00m \u001b[38;5;28;01mas\u001b[39;00m e:  \u001b[38;5;66;03m# e.name is missing module name\u001b[39;00m\n\u001b[1;32m   1412\u001b[0m     \u001b[38;5;28;01mif\u001b[39;00m e\u001b[38;5;241m.\u001b[39mname \u001b[38;5;241m==\u001b[39m \u001b[38;5;124m\"\u001b[39m\u001b[38;5;124mmodels\u001b[39m\u001b[38;5;124m\"\u001b[39m:\n",
+      "File \u001b[0;32m~/Desktop/팀_프로젝트/.venv/lib/python3.8/site-packages/ultralytics/utils/patches.py:116\u001b[0m, in \u001b[0;36mtorch_load\u001b[0;34m(*args, **kwargs)\u001b[0m\n\u001b[1;32m    113\u001b[0m \u001b[38;5;28;01mif\u001b[39;00m TORCH_1_13 \u001b[38;5;129;01mand\u001b[39;00m \u001b[38;5;124m\"\u001b[39m\u001b[38;5;124mweights_only\u001b[39m\u001b[38;5;124m\"\u001b[39m \u001b[38;5;129;01mnot\u001b[39;00m \u001b[38;5;129;01min\u001b[39;00m kwargs:\n\u001b[1;32m    114\u001b[0m     kwargs[\u001b[38;5;124m\"\u001b[39m\u001b[38;5;124mweights_only\u001b[39m\u001b[38;5;124m\"\u001b[39m] \u001b[38;5;241m=\u001b[39m \u001b[38;5;28;01mFalse\u001b[39;00m\n\u001b[0;32m--> 116\u001b[0m \u001b[38;5;28;01mreturn\u001b[39;00m \u001b[43mtorch\u001b[49m\u001b[38;5;241;43m.\u001b[39;49m\u001b[43mload\u001b[49m\u001b[43m(\u001b[49m\u001b[38;5;241;43m*\u001b[39;49m\u001b[43margs\u001b[49m\u001b[43m,\u001b[49m\u001b[43m \u001b[49m\u001b[38;5;241;43m*\u001b[39;49m\u001b[38;5;241;43m*\u001b[39;49m\u001b[43mkwargs\u001b[49m\u001b[43m)\u001b[49m\n",
+      "File \u001b[0;32m~/Desktop/팀_프로젝트/.venv/lib/python3.8/site-packages/torch/serialization.py:998\u001b[0m, in \u001b[0;36mload\u001b[0;34m(f, map_location, pickle_module, weights_only, mmap, **pickle_load_args)\u001b[0m\n\u001b[1;32m    995\u001b[0m \u001b[38;5;28;01mif\u001b[39;00m \u001b[38;5;124m'\u001b[39m\u001b[38;5;124mencoding\u001b[39m\u001b[38;5;124m'\u001b[39m \u001b[38;5;129;01mnot\u001b[39;00m \u001b[38;5;129;01min\u001b[39;00m pickle_load_args\u001b[38;5;241m.\u001b[39mkeys():\n\u001b[1;32m    996\u001b[0m     pickle_load_args[\u001b[38;5;124m'\u001b[39m\u001b[38;5;124mencoding\u001b[39m\u001b[38;5;124m'\u001b[39m] \u001b[38;5;241m=\u001b[39m \u001b[38;5;124m'\u001b[39m\u001b[38;5;124mutf-8\u001b[39m\u001b[38;5;124m'\u001b[39m\n\u001b[0;32m--> 998\u001b[0m \u001b[38;5;28;01mwith\u001b[39;00m \u001b[43m_open_file_like\u001b[49m\u001b[43m(\u001b[49m\u001b[43mf\u001b[49m\u001b[43m,\u001b[49m\u001b[43m \u001b[49m\u001b[38;5;124;43m'\u001b[39;49m\u001b[38;5;124;43mrb\u001b[39;49m\u001b[38;5;124;43m'\u001b[39;49m\u001b[43m)\u001b[49m \u001b[38;5;28;01mas\u001b[39;00m opened_file:\n\u001b[1;32m    999\u001b[0m     \u001b[38;5;28;01mif\u001b[39;00m _is_zipfile(opened_file):\n\u001b[1;32m   1000\u001b[0m         \u001b[38;5;66;03m# The zipfile reader is going to advance the current file position.\u001b[39;00m\n\u001b[1;32m   1001\u001b[0m         \u001b[38;5;66;03m# If we want to actually tail call to torch.jit.load, we need to\u001b[39;00m\n\u001b[1;32m   1002\u001b[0m         \u001b[38;5;66;03m# reset back to the original position.\u001b[39;00m\n\u001b[1;32m   1003\u001b[0m         orig_position \u001b[38;5;241m=\u001b[39m opened_file\u001b[38;5;241m.\u001b[39mtell()\n",
+      "File \u001b[0;32m~/Desktop/팀_프로젝트/.venv/lib/python3.8/site-packages/torch/serialization.py:445\u001b[0m, in \u001b[0;36m_open_file_like\u001b[0;34m(name_or_buffer, mode)\u001b[0m\n\u001b[1;32m    443\u001b[0m \u001b[38;5;28;01mdef\u001b[39;00m\u001b[38;5;250m \u001b[39m\u001b[38;5;21m_open_file_like\u001b[39m(name_or_buffer, mode):\n\u001b[1;32m    444\u001b[0m     \u001b[38;5;28;01mif\u001b[39;00m _is_path(name_or_buffer):\n\u001b[0;32m--> 445\u001b[0m         \u001b[38;5;28;01mreturn\u001b[39;00m \u001b[43m_open_file\u001b[49m\u001b[43m(\u001b[49m\u001b[43mname_or_buffer\u001b[49m\u001b[43m,\u001b[49m\u001b[43m \u001b[49m\u001b[43mmode\u001b[49m\u001b[43m)\u001b[49m\n\u001b[1;32m    446\u001b[0m     \u001b[38;5;28;01melse\u001b[39;00m:\n\u001b[1;32m    447\u001b[0m         \u001b[38;5;28;01mif\u001b[39;00m \u001b[38;5;124m'\u001b[39m\u001b[38;5;124mw\u001b[39m\u001b[38;5;124m'\u001b[39m \u001b[38;5;129;01min\u001b[39;00m mode:\n",
+      "File \u001b[0;32m~/Desktop/팀_프로젝트/.venv/lib/python3.8/site-packages/torch/serialization.py:426\u001b[0m, in \u001b[0;36m_open_file.__init__\u001b[0;34m(self, name, mode)\u001b[0m\n\u001b[1;32m    425\u001b[0m \u001b[38;5;28;01mdef\u001b[39;00m\u001b[38;5;250m \u001b[39m\u001b[38;5;21m__init__\u001b[39m(\u001b[38;5;28mself\u001b[39m, name, mode):\n\u001b[0;32m--> 426\u001b[0m     \u001b[38;5;28msuper\u001b[39m()\u001b[38;5;241m.\u001b[39m\u001b[38;5;21m__init__\u001b[39m(\u001b[38;5;28;43mopen\u001b[39;49m\u001b[43m(\u001b[49m\u001b[43mname\u001b[49m\u001b[43m,\u001b[49m\u001b[43m \u001b[49m\u001b[43mmode\u001b[49m\u001b[43m)\u001b[49m)\n",
+      "\u001b[0;31mFileNotFoundError\u001b[0m: [Errno 2] No such file or directory: 'runs/detect/train/weights/best.pt'"
+     ]
+    }
+   ],
+   "source": [
+    "# best.pt 불러오기 (학습 후 자동 저장된 가중치)\n",
+    "best_model = YOLO(\"runs/detect/train/weights/best.pt\")  # 실제 경로는 로그에 나오는 이름 확인\n",
+    "\n",
+    "val_results = best_model.val(device=\"mps\")\n",
+    "print(\"mAP50-95:\", val_results.box.map)   # 전체 mAP\n",
+    "print(\"클래스별 mAP:\", val_results.box.maps)\n",
+    "\n",
+    "#nvidia gpu를 사용할 경우\n",
+    "best_model.predict(source=img, device=\"cuda\")\n",
+    "best_model.val(device=\"cuda\")\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "**bounding box 시각화**"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "from IPython.display import Image, display\n",
+    "import glob\n",
+    "import random\n",
+    "import os\n",
+    "\n",
+    "# validation 이미지 중 하나 고르기\n",
+    "val_imgs = glob.glob(\"kitti/images_yolo/val/*.png\") + glob.glob(\"kitti/images_yolo/val/*.jpg\")\n",
+    "sample_img = random.choice(val_imgs)\n",
+    "print(\"샘플 이미지:\", sample_img)\n",
+    "\n",
+    "# 예측 (이미지 저장)\n",
+    "pred_results = best_model.predict(\n",
+    "    source=sample_img,\n",
+    "    device=\"mps\",\n",
+    "    save=True\n",
+    ")\n",
+    "\n",
+    "# YOLO가 저장한 이미지 경로 찾기\n",
+    "save_dir = pred_results[0].save_dir  # runs/detect/predict 또는 비슷한 경로\n",
+    "saved_files = list(save_dir.glob(\"*\"))  # Path 객체라면\n",
+    "print(\"저장 경로:\", save_dir)\n",
+    "\n",
+    "# 이미지 표시\n",
+    "for f in saved_files:\n",
+    "    if f.suffix.lower() in [\".png\", \".jpg\", \".jpeg\"]:\n",
+    "        display(Image(filename=str(f)))\n",
+    "        break\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "**fps 측정 코드**"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import time\n",
+    "\n",
+    "# 검증용 이미지 하나 선택\n",
+    "img = random.choice(val_imgs)\n",
+    "print(\"FPS 측정용 이미지:\", img)\n",
+    "\n",
+    "# 워밍업\n",
+    "_ = best_model.predict(source=img, device=\"mps\", verbose=False)\n",
+    "\n",
+    "N = 50\n",
+    "start = time.time()\n",
+    "for _ in range(N):\n",
+    "    _ = best_model.predict(source=img, device=\"mps\", verbose=False)\n",
+    "end = time.time()\n",
+    "\n",
+    "fps = N / (end - start)\n",
+    "print(f\"추론 FPS: {fps:.2f}\")\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "accelerator": "GPU",
+  "colab": {
+   "gpuType": "T4",
+   "provenance": []
+  },
+  "kernelspec": {
+   "display_name": "Python (kitti-yolo)",
+   "language": "python",
+   "name": "kitti-yolo"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.8.10"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}
